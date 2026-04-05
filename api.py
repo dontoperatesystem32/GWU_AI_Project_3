@@ -12,7 +12,7 @@ DEFAULT_USER_ID = "3728"
 DEFAULT_API_KEY = "51c5e9c02680cf99af06"
 
 BASE_URL = "https://www.notexponential.com/aip2pgaming/api/index.php"
-POLL_INTERVAL = 1
+POLL_INTERVAL = 3
 REQUEST_TIMEOUT = 15
 
 
@@ -202,6 +202,7 @@ class APIAgent:
         self.m = 0
         self.board: Optional[Board] = None
         self.agent: Optional[MiniMaxAgent] = None
+        self._last_board_str: Optional[str] = None
 
     def _load_game_details(self) -> JsonDict:
         details = self.client.get_game_details(self.game_id)
@@ -260,13 +261,18 @@ class APIAgent:
         winner_team = team1 if board_winner == X_PLAYER else team2
         return True, winner_team
 
-    def _sync_board(self, board_map: JsonDict, board_str: str) -> None:
+    def _sync_board(self, board_map: JsonDict, board_str: str) -> bool:
         if self.board is None:
             raise RuntimeError("Board not initialized")
 
+        if board_str == self._last_board_str:
+            return False
+
         sync_board_from_map(self.board, board_map)
+        self._last_board_str = board_str
         print("\nCurrent board:")
         display_board_from_string(board_str, self.n)
+        return True
 
     def _print_game_result(self, winner_team: Optional[str]) -> None:
         print("\n" + "═" * 50)
