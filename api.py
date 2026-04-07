@@ -8,22 +8,55 @@ import requests
 from main import Board, MiniMaxAgent, O_PLAYER, X_PLAYER, EMPTY
 
 
-DEFAULT_USER_ID = "3728"
-DEFAULT_API_KEY = "51c5e9c02680cf99af06"
-
 BASE_URL = "https://www.notexponential.com/aip2pgaming/api/index.php"
+ENV_FILE = os.path.join(os.path.dirname(__file__), ".env")
 POLL_INTERVAL = 3
 REQUEST_TIMEOUT = 15
+REQUIRED_CREDENTIALS = ("TTT_USER_ID", "TTT_API_KEY")
 
 
 JsonDict = Dict[str, Any]
 
 
-# Loads API credentials from the environment, falling back to the course defaults.
-def load_credentials() -> Tuple[str, str]:
-    user_id = os.getenv("TTT_USER_ID", DEFAULT_USER_ID)
-    api_key = os.getenv("TTT_API_KEY", DEFAULT_API_KEY)
-    return user_id, api_key
+# Loads key-value pairs from a local .env file without overriding exported env vars.
+def load_env_file(path: str = ENV_FILE) -> None:
+    if not os.path.exists(path):
+        return
+
+    with open(path, encoding="utf-8") as env_file:
+        for raw_line in env_file:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+
+            if key.startswith("export "):
+                key = key[len("export ") :].strip()
+            if not key or key in os.environ:
+                continue
+
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                value = value[1:-1]
+
+            os.environ[key] = value
+
+
+# Loads required API credentials from the process environment or local .env file.
+def load_credentials(env_path: str = ENV_FILE) -> Tuple[str, str]:
+    load_env_file(env_path)
+
+    missing = [name for name in REQUIRED_CREDENTIALS if not os.getenv(name)]
+    if missing:
+        names = ", ".join(missing)
+        raise RuntimeError(
+            f"Missing required API credentials: {names}. "
+            "Create a .env file from .env.example or export them before running api.py."
+        )
+
+    return os.environ["TTT_USER_ID"], os.environ["TTT_API_KEY"]
 
 
 # Splits comma-separated API id lists while ignoring whitespace and empty entries.

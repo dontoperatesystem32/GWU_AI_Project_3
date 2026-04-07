@@ -67,7 +67,8 @@ Credentials can be provided through environment variables:
 - `TTT_USER_ID`
 - `TTT_API_KEY`
 
-If those are not set, `api.py` falls back to the default values currently defined in the file.
+The API runner also loads these values from a local `.env` file. The `.env`
+file is ignored by Git.
 
 ## Setup
 
@@ -82,6 +83,21 @@ source .venv/bin/activate
 
 ```bash
 pip install -r requirements.txt
+```
+
+### 3. Configure API credentials
+
+Create a local `.env` file from the example:
+
+```bash
+cp .env.example .env
+```
+
+Then edit `.env` with your own NotExponential credentials:
+
+```text
+TTT_USER_ID=your_user_id
+TTT_API_KEY=your_api_key
 ```
 
 ## Running Tutorial
@@ -114,12 +130,8 @@ The program will then print the board after each move and finish with either a w
 
 ### Run the online API agent
 
-Set credentials if needed:
-
-```bash
-export TTT_USER_ID="your_user_id"
-export TTT_API_KEY="your_api_key"
-```
+Make sure `.env` contains your `TTT_USER_ID` and `TTT_API_KEY`, or export those
+variables in your shell before running the script.
 
 Start the API runner:
 
@@ -139,7 +151,7 @@ After setup, the program will keep polling the game and automatically submit mov
 ### Run the tests
 
 ```bash
-python3 -m unittest test_main.py
+python3 -m unittest test_main.py test_api.py
 ```
 
 ## Notes
@@ -147,4 +159,3 @@ python3 -m unittest test_main.py
 - `main.py` runs a local simulation and does not require network access.
 - `api.py` requires internet access and the external game service to be available.
 - The tests use Python's built-in `unittest` module, so no extra test framework is required.
-
