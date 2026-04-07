@@ -19,16 +19,19 @@ REQUEST_TIMEOUT = 15
 JsonDict = Dict[str, Any]
 
 
+# Loads API credentials from the environment, falling back to the course defaults.
 def load_credentials() -> Tuple[str, str]:
     user_id = os.getenv("TTT_USER_ID", DEFAULT_USER_ID)
     api_key = os.getenv("TTT_API_KEY", DEFAULT_API_KEY)
     return user_id, api_key
 
 
+# Splits comma-separated API id lists while ignoring whitespace and empty entries.
 def split_csv_ids(raw_value: str) -> List[str]:
     return [value.strip() for value in raw_value.split(",") if value.strip()]
 
 
+# Normalizes API fields that may already be dictionaries or JSON-encoded strings.
 def parse_json_object(raw_value: Any, default: Optional[JsonDict] = None) -> JsonDict:
     if default is None:
         default = {}
@@ -40,7 +43,9 @@ def parse_json_object(raw_value: Any, default: Optional[JsonDict] = None) -> Jso
     return raw_value
 
 
+# Thin wrapper around the NotExponential Tic Tac Toe API endpoints used by the runner.
 class APIClient:
+    # Stores user credentials and common request headers for all API calls.
     def __init__(self, user_id: str, api_key: str):
         self.user_id = user_id
         self._auth_headers = {
@@ -52,6 +57,7 @@ class APIClient:
             ),
         }
 
+    # Sends a GET request with shared auth, timeout handling, and JSON decoding.
     def _get(self, params: JsonDict) -> JsonDict:
         response = requests.get(
             BASE_URL,
@@ -62,6 +68,7 @@ class APIClient:
         response.raise_for_status()
         return response.json()
 
+    # Sends a form-encoded POST request with shared auth, timeout handling, and JSON decoding.
     def _post(self, data: JsonDict) -> JsonDict:
         headers = {
             **self._auth_headers,
@@ -76,37 +83,44 @@ class APIClient:
         response.raise_for_status()
         return response.json()
 
+    # Converts non-OK API responses into RuntimeError messages with context.
     def _check(self, result: JsonDict, context: str = "") -> JsonDict:
         if result.get("code") != "OK":
             message = result.get("message", "Unknown error")
             raise RuntimeError(f"API error [{context}]: {message}  |  Full: {result}")
         return result
 
+    # Creates a new team and returns its API team id.
     def create_team(self, name: str) -> str:
         result = self._post({"type": "team", "name": name})
         self._check(result, "create_team")
         return str(result["teamId"])
 
+    # Adds a user to an existing team.
     def add_team_member(self, team_id: str, user_id: str) -> None:
         result = self._post({"type": "member", "teamId": team_id, "userId": user_id})
         self._check(result, "add_team_member")
 
+    # Removes a user from an existing team.
     def remove_team_member(self, team_id: str, user_id: str) -> None:
         result = self._post(
             {"type": "removeMember", "teamId": team_id, "userId": user_id}
         )
         self._check(result, "remove_team_member")
 
+    # Fetches the API user ids currently assigned to a team.
     def get_team_members(self, team_id: str) -> List[str]:
         result = self._get({"type": "team", "teamId": team_id})
         self._check(result, "get_team_members")
         return result.get("userIds", [])
 
+    # Fetches the team ids associated with the authenticated user.
     def get_my_teams(self) -> List[str]:
         result = self._get({"type": "myTeams"})
         self._check(result, "get_my_teams")
         return split_csv_ids(result.get("teams", ""))
 
+    # Creates a generalized Tic Tac Toe game between two teams.
     def create_game(
         self,
         team_id1: str,
@@ -127,17 +141,20 @@ class APIClient:
         self._check(result, "create_game")
         return str(result["gameId"])
 
+    # Lists all games for the user, or only open games when requested.
     def get_my_games(self, open_only: bool = False) -> List[str]:
         request_type = "myOpenGames" if open_only else "myGames"
         result = self._get({"type": request_type})
         self._check(result, "get_my_games")
         return split_csv_ids(result.get("games", ""))
 
+    # Retrieves one game's metadata as a dictionary.
     def get_game_details(self, game_id: str) -> JsonDict:
         result = self._get({"type": "gameDetails", "gameId": game_id})
         self._check(result, "get_game_details")
         return parse_json_object(result.get("game", "{}"))
 
+    # Submits a move to the API and returns the accepted move id when present.
     def make_move(self, game_id: str, team_id: str, row: int, col: int) -> str:
         result = self._post(
             {
@@ -150,26 +167,31 @@ class APIClient:
         self._check(result, "make_move")
         return str(result.get("moveId", ""))
 
+    # Retrieves recent moves for one game.
     def get_moves(self, game_id: str, count: int = 50) -> List[JsonDict]:
         result = self._get({"type": "moves", "gameId": game_id, "count": count})
         self._check(result, "get_moves")
         return result.get("moves", [])
 
+    # Retrieves the API's printable board-string representation for display.
     def get_board_string(self, game_id: str) -> str:
         result = self._get({"type": "boardString", "gameId": game_id})
         self._check(result, "get_board_string")
         return result.get("output", "")
 
+    # Retrieves the sparse board map used to synchronize the local Board object.
     def get_board_map(self, game_id: str) -> JsonDict:
         result = self._get({"type": "boardMap", "gameId": game_id})
         self._check(result, "get_board_map")
         return parse_json_object(result.get("output"), {})
 
 
+# Applies a sparse API board map to the local cached Board state.
 def sync_board_from_map(board: Board, board_map: JsonDict) -> None:
     board.load_position(board_map)
 
 
+# Prints the API board string with row and column labels for easier manual tracking.
 def display_board_from_string(board_str: str, n: int) -> None:
     rows = board_str.strip().split("\n") if board_str.strip() else [EMPTY * n for _ in range(n)]
     col_header = "   " + "  ".join(str(col) for col in range(n))
@@ -182,7 +204,9 @@ def display_board_from_string(board_str: str, n: int) -> None:
     print("  +" + "---" * n + "+")
 
 
+# Coordinates API polling, local board synchronization, and automated move submission.
 class APIAgent:
+    # Stores API/game identifiers and search configuration for the remote runner.
     def __init__(
         self,
         client: APIClient,
@@ -204,6 +228,7 @@ class APIAgent:
         self.agent: Optional[MiniMaxAgent] = None
         self._last_board_str: Optional[str] = None
 
+    # Loads game metadata and initializes the local board and minimax agent.
     def _load_game_details(self) -> JsonDict:
         details = self.client.get_game_details(self.game_id)
         self.n = int(details.get("boardsize", 12))
@@ -221,6 +246,7 @@ class APIAgent:
         print(f"We play as : {self.our_symbol}")
         return details
 
+    # Determines our piece symbol from the game's team ordering.
     def _determine_symbol(self, details: JsonDict) -> str:
         team1 = str(details.get("team1id", ""))
         team2 = str(details.get("team2id", ""))
@@ -231,18 +257,22 @@ class APIAgent:
             return X_PLAYER
         raise ValueError("Your team is not part of this game")
 
+    # Fetches the current game metadata, sparse board map, and printable board in one step.
     def _fetch_game_snapshot(self) -> Tuple[JsonDict, JsonDict, str]:
         details = self.client.get_game_details(self.game_id)
         board_map = self.client.get_board_map(self.game_id)
         board_str = self.client.get_board_string(self.game_id)
         return details, board_map, board_str
 
+    # Checks whether the API says it is currently our team's turn.
     def _is_our_turn(self, details: JsonDict) -> bool:
         return str(details.get("turnteamid", "")) == self.our_team_id
 
+    # Determines whether either the API or local board state has reached a final result.
     def _is_game_over(self, details: JsonDict) -> Tuple[bool, Optional[str]]:
         winner = details.get("winnerteamid")
 
+        # Prefer the server's declared winner when it is available.
         if winner is not None and str(winner).strip() != "":
             return True, str(winner)
 
@@ -256,11 +286,13 @@ class APIAgent:
         if board_winner is None:
             return True, None
 
+        # Convert the local X/O winner back into the API's team id convention.
         team1 = str(details.get("team1id", ""))
         team2 = str(details.get("team2id", ""))
         winner_team = team1 if board_winner == X_PLAYER else team2
         return True, winner_team
 
+    # Synchronizes the local board only when the remote board string has changed.
     def _sync_board(self, board_map: JsonDict, board_str: str) -> bool:
         if self.board is None:
             raise RuntimeError("Board not initialized")
@@ -274,6 +306,7 @@ class APIAgent:
         display_board_from_string(board_str, self.n)
         return True
 
+    # Prints a concise win/loss/draw message when the remote game ends.
     def _print_game_result(self, winner_team: Optional[str]) -> None:
         print("\n" + "═" * 50)
         if winner_team == self.our_team_id:
@@ -284,10 +317,12 @@ class APIAgent:
             print(f"Loss. Winner: team {winner_team}")
         print("═" * 50)
 
+    # Main polling loop: wait for our turn, compute a move, submit it, and repeat.
     def run(self) -> None:
         self._load_game_details()
 
         while True:
+            # Each loop pulls both metadata and board state so turn/result checks match the board.
             details, board_map, board_str = self._fetch_game_snapshot()
             self._sync_board(board_map, board_str)
 
@@ -301,6 +336,8 @@ class APIAgent:
                 time.sleep(POLL_INTERVAL)
                 continue
 
+            # From here on, the remote API says it is our turn, so the local minimax result
+            # can be submitted immediately unless the game changed during the request.
             if self.agent is None or self.board is None:
                 raise RuntimeError("Agent not initialized")
 
@@ -314,6 +351,7 @@ class APIAgent:
             print(f"Submitting move: ({row}, {col})")
 
             try:
+                # Rejected moves usually mean the remote state changed; keep polling instead of exiting.
                 move_id = self.client.make_move(self.game_id, self.our_team_id, row, col)
                 print(f"Move accepted (moveId={move_id})")
             except RuntimeError as error:
@@ -323,6 +361,7 @@ class APIAgent:
             time.sleep(1)
 
 
+# Lets the user choose an existing team or create a new one for the API game.
 def setup_team(client: APIClient) -> str:
     print("\nTeam setup:")
     existing = client.get_my_teams()
@@ -341,6 +380,7 @@ def setup_team(client: APIClient) -> str:
     return team_id
 
 
+# Optionally adds one teammate before creating or joining a game.
 def maybe_add_team_member(client: APIClient, team_id: str) -> None:
     answer = input("\nAdd a team member? [y/n]: ").strip().lower()
     if answer != "y":
@@ -351,6 +391,7 @@ def maybe_add_team_member(client: APIClient, team_id: str) -> None:
     print(f"Added user {teammate_id} to team {team_id}")
 
 
+# Lets the user create a new game or connect the runner to an existing game id.
 def setup_game(client: APIClient, our_team_id: str) -> str:
     print("\nGame setup:")
     print("1. Create a new game")
@@ -372,6 +413,7 @@ def setup_game(client: APIClient, our_team_id: str) -> str:
     return game_id
 
 
+# Reads search controls for the remote agent, using robust defaults on bad input.
 def read_search_settings() -> Tuple[float, int]:
     try:
         time_limit = float(
@@ -383,6 +425,7 @@ def read_search_settings() -> Tuple[float, int]:
         return 5.0, 6
 
 
+# Entry point for the automated NotExponential API runner.
 def main() -> None:
     print("\nAI P2P Tic Tac Toe — Automated Agent Runner")
 

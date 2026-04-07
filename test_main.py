@@ -4,11 +4,13 @@ import unittest
 from main import Board, MiniMaxAgent, X_PLAYER, O_PLAYER, evaluate
 
 
+# Applies a sequence of test moves to a board in the same format used by fixtures.
 def apply_moves(board: Board, moves):
     for row, col, player in moves:
         board.make_move(row, col, player)
 
 
+# Converts a full Board object into the sparse API-style coordinate map.
 def board_map(board: Board):
     position = {}
     for row in range(board.n):
@@ -18,7 +20,9 @@ def board_map(board: Board):
     return position
 
 
+# Verifies that Board cache mutations stay consistent across load, move, and undo paths.
 class BoardStateTests(unittest.TestCase):
+    # A move followed by undo should restore all user-visible and cached board state.
     def test_make_undo_restores_state(self):
         board = Board(6, 4)
         apply_moves(
@@ -56,6 +60,7 @@ class BoardStateTests(unittest.TestCase):
         self.assertEqual(evaluate(board, X_PLAYER), baseline["eval_x"])
         self.assertEqual(evaluate(board, O_PLAYER), baseline["eval_o"])
 
+    # Loading from a sparse map should match the same position built incrementally.
     def test_load_position_matches_incremental_state(self):
         board = Board(7, 4)
         apply_moves(
@@ -80,7 +85,9 @@ class BoardStateTests(unittest.TestCase):
         self.assertEqual(evaluate(rebuilt, O_PLAYER), evaluate(board, O_PLAYER))
 
 
+# Verifies the minimax agent's tactical behavior and fallback behavior under time pressure.
 class AgentBehaviorTests(unittest.TestCase):
+    # The agent should take an available winning square immediately.
     def test_chooses_immediate_win(self):
         board = Board(5, 4)
         apply_moves(
@@ -97,6 +104,7 @@ class AgentBehaviorTests(unittest.TestCase):
         agent = MiniMaxAgent(X_PLAYER, time_limit=0.1, max_depth=4)
         self.assertEqual(agent.best_move(board), (2, 3))
 
+    # The agent should block the opponent's immediate winning square.
     def test_blocks_immediate_loss(self):
         board = Board(5, 4)
         apply_moves(
@@ -114,6 +122,7 @@ class AgentBehaviorTests(unittest.TestCase):
         agent = MiniMaxAgent(X_PLAYER, time_limit=0.1, max_depth=4)
         self.assertEqual(agent.best_move(board), (2, 3))
 
+    # Defensive priority should beat a weaker attacking continuation when a block is required.
     def test_prefers_required_block_over_attack(self):
         board = Board(6, 4)
         apply_moves(
@@ -131,6 +140,7 @@ class AgentBehaviorTests(unittest.TestCase):
         agent = MiniMaxAgent(X_PLAYER, time_limit=0.1, max_depth=4)
         self.assertEqual(agent.best_move(board), (2, 3))
 
+    # Enabling the transposition table should not change the selected move.
     def test_tt_enabled_matches_disabled(self):
         board = Board(5, 4)
         apply_moves(
@@ -151,11 +161,13 @@ class AgentBehaviorTests(unittest.TestCase):
 
         self.assertEqual(cached_agent.best_move(board), uncached_agent.best_move(board))
 
+    # An empty even-sized board should choose one of the central four cells.
     def test_empty_board_returns_center_move(self):
         board = Board(12, 6)
         agent = MiniMaxAgent(X_PLAYER, time_limit=0.05, max_depth=4)
         self.assertIn(agent.best_move(board), {(5, 5), (5, 6), (6, 5), (6, 6)})
 
+    # With an extremely short budget, the agent should still return a legal fallback move.
     def test_short_budget_returns_legal_move(self):
         board = Board(12, 6)
         apply_moves(
