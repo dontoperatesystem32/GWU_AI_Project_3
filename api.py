@@ -12,10 +12,19 @@ BASE_URL = "https://www.notexponential.com/aip2pgaming/api/index.php"
 ENV_FILE = os.path.join(os.path.dirname(__file__), ".env")
 POLL_INTERVAL = 3
 REQUEST_TIMEOUT = 15
+REQUEST_RETRY_LIMIT = 20
+REQUEST_RETRY_DELAY = 1.5
+RECONNECT_DELAY = 2.0
+TRANSIENT_HTTP_STATUS_CODES = {500}
 REQUIRED_CREDENTIALS = ("TTT_USER_ID", "TTT_API_KEY")
 
 
 JsonDict = Dict[str, Any]
+
+
+# Raised when the remote API fails in a way that should be retried instead of ending the game.
+class TransientAPIError(RuntimeError):
+    pass
 
 
 # Loads key-value pairs from a local .env file without overriding exported env vars.
@@ -89,32 +98,69 @@ class APIClient:
                 "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             ),
         }
+        self._session = requests.Session()
+
+    # Recreates the HTTP session after transient server failures or dropped connections.
+    def reconnect(self) -> None:
+        self._session.close()
+        self._session = requests.Session()
+
+    # Sends one authenticated HTTP request with retries for transient server failures.
+    def _request(
+        self,
+        method: str,
+        *,
+        params: Optional[JsonDict] = None,
+        data: Optional[JsonDict] = None,
+    ) -> JsonDict:
+        action = (params or data or {}).get("type", method.lower())
+        headers = self._auth_headers
+        if method == "POST":
+            headers = {
+                **headers,
+                "Content-Type": "application/x-www-form-urlencoded",
+            }
+
+        last_error: Optional[Exception] = None
+        for attempt in range(REQUEST_RETRY_LIMIT + 1):
+            try:
+                response = self._session.request(
+                    method,
+                    BASE_URL,
+                    headers=headers,
+                    params=params,
+                    data=data,
+                    timeout=REQUEST_TIMEOUT,
+                )
+                response.raise_for_status()
+                return response.json()
+            except requests.HTTPError as error:
+                status_code = (
+                    error.response.status_code if error.response is not None else None
+                )
+                if status_code not in TRANSIENT_HTTP_STATUS_CODES:
+                    raise
+                last_error = error
+            except (requests.ConnectionError, requests.Timeout) as error:
+                last_error = error
+
+            if attempt == REQUEST_RETRY_LIMIT:
+                break
+
+            self.reconnect()
+            time.sleep(REQUEST_RETRY_DELAY * (attempt + 1))
+
+        raise TransientAPIError(
+            f"Transient API failure [{action}] after {REQUEST_RETRY_LIMIT + 1} attempts"
+        ) from last_error
 
     # Sends a GET request with shared auth, timeout handling, and JSON decoding.
     def _get(self, params: JsonDict) -> JsonDict:
-        response = requests.get(
-            BASE_URL,
-            headers=self._auth_headers,
-            params=params,
-            timeout=REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-        return response.json()
+        return self._request("GET", params=params)
 
     # Sends a form-encoded POST request with shared auth, timeout handling, and JSON decoding.
     def _post(self, data: JsonDict) -> JsonDict:
-        headers = {
-            **self._auth_headers,
-            "Content-Type": "application/x-www-form-urlencoded",
-        }
-        response = requests.post(
-            BASE_URL,
-            headers=headers,
-            data=data,
-            timeout=REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-        return response.json()
+        return self._request("POST", data=data)
 
     # Converts non-OK API responses into RuntimeError messages with context.
     def _check(self, result: JsonDict, context: str = "") -> JsonDict:
@@ -261,18 +307,53 @@ class APIAgent:
         self.agent: Optional[MiniMaxAgent] = None
         self._last_board_str: Optional[str] = None
 
+    # Reconnects to the same game while preserving per-agent search state when possible.
+    def _recover_from_server_error(self, error: TransientAPIError) -> None:
+        print(f"\nTransient server failure: {error}")
+        print(
+            "Reconnecting with the same game and search settings "
+            f"(gameId={self.game_id}, teamId={self.our_team_id}, "
+            f"time_limit={self.time_limit}, max_depth={self.max_depth})"
+        )
+        self.client.reconnect()
+        self._last_board_str = None
+        time.sleep(RECONNECT_DELAY)
+
+    # Keeps trying to reload the remote game until the server responds again.
+    def _reload_game_state(self) -> None:
+        while True:
+            try:
+                self._load_game_details()
+                return
+            except TransientAPIError as error:
+                self._recover_from_server_error(error)
+
     # Loads game metadata and initializes the local board and minimax agent.
     def _load_game_details(self) -> JsonDict:
         details = self.client.get_game_details(self.game_id)
-        self.n = int(details.get("boardsize", 12))
-        self.m = int(details.get("target", 6))
-        self.our_symbol = self._determine_symbol(details)
-        self.board = Board(self.n, self.m)
-        self.agent = MiniMaxAgent(
-            self.our_symbol,
-            time_limit=self.time_limit,
-            max_depth=self.max_depth,
+        next_n = int(details.get("boardsize", 12))
+        next_m = int(details.get("target", 6))
+        next_symbol = self._determine_symbol(details)
+
+        reuse_agent = (
+            self.agent is not None
+            and self.agent.player == next_symbol
+            and self.agent.time_limit == self.time_limit
+            and self.agent.max_depth == self.max_depth
+            and self.n == next_n
+            and self.m == next_m
         )
+
+        self.n = next_n
+        self.m = next_m
+        self.our_symbol = next_symbol
+        self.board = Board(self.n, self.m)
+        if not reuse_agent:
+            self.agent = MiniMaxAgent(
+                self.our_symbol,
+                time_limit=self.time_limit,
+                max_depth=self.max_depth,
+            )
 
         print(f"\nGame {self.game_id} loaded:")
         print(f"Board : {self.n}×{self.n}  |  Target : {self.m}")
@@ -352,46 +433,50 @@ class APIAgent:
 
     # Main polling loop: wait for our turn, compute a move, submit it, and repeat.
     def run(self) -> None:
-        self._load_game_details()
+        self._reload_game_state()
 
         while True:
-            # Each loop pulls both metadata and board state so turn/result checks match the board.
-            details, board_map, board_str = self._fetch_game_snapshot()
-            self._sync_board(board_map, board_str)
-
-            over, winner_team = self._is_game_over(details)
-            if over:
-                self._print_game_result(winner_team)
-                break
-
-            if not self._is_our_turn(details):
-                print(f"Waiting for opponent… (polling every {POLL_INTERVAL}s)")
-                time.sleep(POLL_INTERVAL)
-                continue
-
-            # From here on, the remote API says it is our turn, so the local minimax result
-            # can be submitted immediately unless the game changed during the request.
-            if self.agent is None or self.board is None:
-                raise RuntimeError("Agent not initialized")
-
-            print(f"Computing move as {self.our_symbol}…")
-            move = self.agent.best_move(self.board)
-            if move is None:
-                print("Agent returned no move. Stopping.")
-                break
-
-            row, col = move
-            print(f"Submitting move: ({row}, {col})")
-
             try:
-                # Rejected moves usually mean the remote state changed; keep polling instead of exiting.
-                move_id = self.client.make_move(self.game_id, self.our_team_id, row, col)
-                print(f"Move accepted (moveId={move_id})")
-            except RuntimeError as error:
-                print(f"Move rejected: {error}")
-                time.sleep(2)
+                # Each loop pulls both metadata and board state so turn/result checks match the board.
+                details, board_map, board_str = self._fetch_game_snapshot()
+                self._sync_board(board_map, board_str)
 
-            time.sleep(1)
+                over, winner_team = self._is_game_over(details)
+                if over:
+                    self._print_game_result(winner_team)
+                    break
+
+                if not self._is_our_turn(details):
+                    print(f"Waiting for opponent… (polling every {POLL_INTERVAL}s)")
+                    time.sleep(POLL_INTERVAL)
+                    continue
+
+                # From here on, the remote API says it is our turn, so the local minimax result
+                # can be submitted immediately unless the game changed during the request.
+                if self.agent is None or self.board is None:
+                    raise RuntimeError("Agent not initialized")
+
+                print(f"Computing move as {self.our_symbol}…")
+                move = self.agent.best_move(self.board)
+                if move is None:
+                    print("Agent returned no move. Stopping.")
+                    break
+
+                row, col = move
+                print(f"Submitting move: ({row}, {col})")
+
+                try:
+                    # Rejected moves usually mean the remote state changed; keep polling instead of exiting.
+                    move_id = self.client.make_move(self.game_id, self.our_team_id, row, col)
+                    print(f"Move accepted (moveId={move_id})")
+                except RuntimeError as error:
+                    print(f"Move rejected: {error}")
+                    time.sleep(2)
+
+                time.sleep(1)
+            except TransientAPIError as error:
+                self._recover_from_server_error(error)
+                self._reload_game_state()
 
 
 # Lets the user choose an existing team or create a new one for the API game.
