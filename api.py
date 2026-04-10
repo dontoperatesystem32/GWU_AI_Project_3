@@ -15,11 +15,13 @@ REQUEST_TIMEOUT = 15
 REQUEST_RETRY_LIMIT = 20
 REQUEST_RETRY_DELAY = 1.5
 RECONNECT_DELAY = 2.0
+SNAPSHOT_RETRY_DELAY = 0.2
 TRANSIENT_HTTP_STATUS_CODES = {500}
 REQUIRED_CREDENTIALS = ("TTT_USER_ID", "TTT_API_KEY")
 
 
 JsonDict = Dict[str, Any]
+BoardSignature = Tuple[Tuple[str, str], ...]
 
 
 # Raised when the remote API fails in a way that should be retried instead of ending the game.
@@ -270,6 +272,22 @@ def sync_board_from_map(board: Board, board_map: JsonDict) -> None:
     board.load_position(board_map)
 
 
+# Converts a sparse board map into a stable fingerprint for change detection.
+def board_signature(board_map: JsonDict) -> BoardSignature:
+    return tuple(sorted((str(key), str(value)) for key, value in board_map.items()))
+
+
+# Builds a printable board string directly from the sparse board map used by the AI.
+def board_string_from_map(board_map: JsonDict, n: int) -> str:
+    rows = [[EMPTY for _ in range(n)] for _ in range(n)]
+
+    for key, symbol in board_map.items():
+        row, col = map(int, str(key).split(","))
+        rows[row][col] = symbol
+
+    return "\n".join("".join(row) for row in rows)
+
+
 # Prints the API board string with row and column labels for easier manual tracking.
 def display_board_from_string(board_str: str, n: int) -> None:
     rows = board_str.strip().split("\n") if board_str.strip() else [EMPTY * n for _ in range(n)]
@@ -305,7 +323,7 @@ class APIAgent:
         self.m = 0
         self.board: Optional[Board] = None
         self.agent: Optional[MiniMaxAgent] = None
-        self._last_board_str: Optional[str] = None
+        self._last_board_signature: Optional[BoardSignature] = None
 
     # Reconnects to the same game while preserving per-agent search state when possible.
     def _recover_from_server_error(self, error: TransientAPIError) -> None:
@@ -316,7 +334,7 @@ class APIAgent:
             f"time_limit={self.time_limit}, max_depth={self.max_depth})"
         )
         self.client.reconnect()
-        self._last_board_str = None
+        self._last_board_signature = None
         time.sleep(RECONNECT_DELAY)
 
     # Keeps trying to reload the remote game until the server responds again.
@@ -371,12 +389,17 @@ class APIAgent:
             return X_PLAYER
         raise ValueError("Your team is not part of this game")
 
-    # Fetches the current game metadata, sparse board map, and printable board in one step.
-    def _fetch_game_snapshot(self) -> Tuple[JsonDict, JsonDict, str]:
-        details = self.client.get_game_details(self.game_id)
-        board_map = self.client.get_board_map(self.game_id)
-        board_str = self.client.get_board_string(self.game_id)
-        return details, board_map, board_str
+    # Fetches a stable board/details snapshot so the displayed and searched position match.
+    def _fetch_game_snapshot(self) -> Tuple[JsonDict, JsonDict]:
+        while True:
+            board_map_before = self.client.get_board_map(self.game_id)
+            details = self.client.get_game_details(self.game_id)
+            board_map_after = self.client.get_board_map(self.game_id)
+
+            if board_signature(board_map_before) == board_signature(board_map_after):
+                return details, board_map_after
+
+            time.sleep(SNAPSHOT_RETRY_DELAY)
 
     # Checks whether the API says it is currently our team's turn.
     def _is_our_turn(self, details: JsonDict) -> bool:
@@ -406,18 +429,19 @@ class APIAgent:
         winner_team = team1 if board_winner == X_PLAYER else team2
         return True, winner_team
 
-    # Synchronizes the local board only when the remote board string has changed.
-    def _sync_board(self, board_map: JsonDict, board_str: str) -> bool:
+    # Synchronizes the local board only when the remote sparse position has changed.
+    def _sync_board(self, board_map: JsonDict) -> bool:
         if self.board is None:
             raise RuntimeError("Board not initialized")
 
-        if board_str == self._last_board_str:
+        current_signature = board_signature(board_map)
+        if current_signature == self._last_board_signature:
             return False
 
         sync_board_from_map(self.board, board_map)
-        self._last_board_str = board_str
+        self._last_board_signature = current_signature
         print("\nCurrent board:")
-        display_board_from_string(board_str, self.n)
+        display_board_from_string(board_string_from_map(board_map, self.n), self.n)
         return True
 
     # Prints a concise win/loss/draw message when the remote game ends.
@@ -438,8 +462,8 @@ class APIAgent:
         while True:
             try:
                 # Each loop pulls both metadata and board state so turn/result checks match the board.
-                details, board_map, board_str = self._fetch_game_snapshot()
-                self._sync_board(board_map, board_str)
+                details, board_map = self._fetch_game_snapshot()
+                self._sync_board(board_map)
 
                 over, winner_team = self._is_game_over(details)
                 if over:

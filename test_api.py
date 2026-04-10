@@ -34,7 +34,16 @@ except ModuleNotFoundError:
     fake_requests.Session = FakeSession
     sys.modules["requests"] = fake_requests
 
-from api import APIAgent, APIClient, TransientAPIError, X_PLAYER, load_credentials, load_env_file
+from api import (
+    APIAgent,
+    APIClient,
+    TransientAPIError,
+    X_PLAYER,
+    board_string_from_map,
+    load_credentials,
+    load_env_file,
+)
+from main import Board, O_PLAYER
 
 
 class EnvConfigTests(unittest.TestCase):
@@ -157,6 +166,46 @@ class APIReconnectTests(unittest.TestCase):
 
         self.assertIn(("only-agent-1", "X"), agent1.agent._tt)
         self.assertNotIn(("only-agent-1", "X"), agent2.agent._tt)
+
+    def test_fetch_game_snapshot_waits_for_stable_board_map(self):
+        client = mock.Mock()
+        client.get_board_map.side_effect = [
+            {"0,0": X_PLAYER},
+            {"0,0": X_PLAYER, "1,1": O_PLAYER},
+            {"0,0": X_PLAYER, "1,1": O_PLAYER},
+            {"0,0": X_PLAYER, "1,1": O_PLAYER},
+        ]
+        client.get_game_details.side_effect = [
+            {"turnteamid": "our-team"},
+            {"turnteamid": "our-team"},
+        ]
+
+        agent = APIAgent(client, "game-7", "our-team")
+
+        with mock.patch("api.time.sleep") as sleep_mock:
+            details, board_map = agent._fetch_game_snapshot()
+
+        self.assertEqual(details["turnteamid"], "our-team")
+        self.assertEqual(board_map, {"0,0": X_PLAYER, "1,1": O_PLAYER})
+        sleep_mock.assert_called_once()
+
+    def test_sync_board_uses_board_map_for_display_and_search(self):
+        client = mock.Mock()
+        agent = APIAgent(client, "game-8", "our-team")
+        agent.n = 3
+        agent.m = 3
+        agent.board = Board(3, 3)
+        board_map = {"0,0": X_PLAYER, "1,1": O_PLAYER}
+
+        with mock.patch("api.display_board_from_string") as display_mock:
+            changed = agent._sync_board(board_map)
+            unchanged = agent._sync_board(dict(board_map))
+
+        self.assertTrue(changed)
+        self.assertFalse(unchanged)
+        self.assertEqual(agent.board.grid[0][0], X_PLAYER)
+        self.assertEqual(agent.board.grid[1][1], O_PLAYER)
+        display_mock.assert_called_once_with(board_string_from_map(board_map, 3), 3)
 
 
 if __name__ == "__main__":
