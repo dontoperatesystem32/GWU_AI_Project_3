@@ -521,18 +521,6 @@ def setup_team(client: APIClient) -> str:
     print(f"Added yourself (userId={client.user_id}) to team")
     return team_id
 
-
-# Optionally adds one teammate before creating or joining a game.
-def maybe_add_team_member(client: APIClient, team_id: str) -> None:
-    answer = input("\nAdd a team member? [y/n]: ").strip().lower()
-    if answer != "y":
-        return
-
-    teammate_id = input("Teammate's user ID: ").strip()
-    client.add_team_member(team_id, teammate_id)
-    print(f"Added user {teammate_id} to team {team_id}")
-
-
 # Lets the user create a new game or connect the runner to an existing game id.
 def setup_game(client: APIClient, our_team_id: str) -> str:
     print("\nGame setup:")
@@ -575,7 +563,6 @@ def main() -> None:
     client = APIClient(user_id, api_key)
 
     our_team_id = setup_team(client)
-    maybe_add_team_member(client, our_team_id)
     game_id = setup_game(client, our_team_id)
 
     print("\nAI settings:")
